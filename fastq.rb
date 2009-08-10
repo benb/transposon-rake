@@ -16,23 +16,22 @@ class Fastq
                 @f=File.open(file,'r')
         end
         def each
-                line=0
-                @f.each do |l|
-                        line+=1
-                        case line
-                          when 1 
-                                  @name=l.sub("^@","")
-                          when 2 
-                                  @seq=l.chomp
-                          when 3
-                          when 4 
-                                  @qual=l.chomp
-                          end
-                        if (line==4)
-                                line = 0
-                                yield OpenStruct.new(:name => @name, :seq => @seq, :qual => @qual)
-                        end
+                while self.has_next?
+                        yield self.next
                 end
+        end
+        def next
+                name = @f.readline.sub("^@","").chomp
+                seq = @f.readline.chomp
+                @f.readline
+                qual=@f.readline.chomp
+                return OpenStruct.new(:name => name, :seq => seq, :qual => qual)
+        end
+        def has_next?
+                return !@f.eof?
+        end
+        def self.tofastqstr(r)
+                r.name.chomp + "\n" + r.seq + "\n+\n" + r.qual
         end
 end
 
@@ -69,7 +68,7 @@ class TrimmedFastq
                        
                                 record.seq.each_substring(q.pattern.length){|str,pos|
                                         if (q.match(str)<bestDist)
-                                                # puts q.pattern + " matches " + str
+                                                puts q.pattern + " matches " + str
                                                 lastPos=pos
                                                 bestDist = q.match(str)
                                         end
@@ -80,17 +79,18 @@ class TrimmedFastq
                                 end
                         }
                         record.seq="" if record.seq==nil
+                        record.qual="" if record.qual==nil
                         yield record
                 end
         end
 end
 
-queriesStart = [Levenshtein.new("CT")]
-queriesEnd = [Levenshtein.new("GA")]
+#queriesStart = [Levenshtein.new("CT")]
+#queriesEnd = [Levenshtein.new("GA")]
 
 
-f = Fastq.new("test.fastq")
-ft = TrimmedFastq.new(f,queriesStart,queriesEnd)
-ft.each{|r|
-        puts(r.name.chomp + "\n" + r.seq + "\n+\n" + r.qual)
-}
+#f = Fastq.new("test.fastq")
+#ft = TrimmedFastq.new(f,queriesStart,queriesEnd)
+#ft.each{|r|
+#        puts(r.name.chomp + "\n" + r.seq + "\n+\n" + r.qual)
+#}

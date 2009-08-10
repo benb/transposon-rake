@@ -1,0 +1,497 @@
+require 'rubygems'
+require 'amatch'
+require 'ostruct'
+require 'fastq'
+require 'md5'
+include Amatch
+
+
+allruns = ["3293_2","3293_3","3293_5","3293_6"]
+
+#locations of important binaries
+ssaha_pileup = "./ssaha_pileup"
+ssaha2='~hp3/sw/arch/x86_64-linux/bin/ssaha2-2.4'
+
+#regex of the tag we want to pull out
+tagregex = /^[NG][GN][TN][TN][AN][AN]/
+
+task :process_fastq => allruns.map{|i| i+"_1.fastqsel"} + allruns.map{|i| i + "_2.fastqsel"}
+
+class PairFastq
+        def initialize(r1,r2)
+                @r1=r1
+                @r2=r2
+        end
+        def next
+                [@r1.next,@r2.next]
+        end
+        def has_next?
+                @r1.has_next? && @r2.has_next?
+        end
+        def each
+                while self.has_next?
+                        yield self.next
+                end
+        end
+end
+#Clip the reads:
+rule(/_1.fastqde/ => 
+     [proc {|task_name| task_name.sub(/de$/,'') },
+     proc {|task_name| task_name.sub(/_1.fastqde$/,'_2.fastq') }]) do |t|
+        #This code is SO SLOW you should probably use something else
+        puts(t.prerequisites[0])
+        r1= Fastq.new(t.prerequisites[0])
+        r2 = Fastq.new(t.prerequisites[1])
+        o1=File.new(t.prerequisites[0]+"dedupe.tmp","w")
+        o2=File.new(t.prerequisites[1]+"dedupe.tmp","w")
+        pair = PairFastq.new(r1,r2)
+        seen={}
+        pair.each do |rp|
+                rphash = rp[0].seq + "," + rp[1].seq
+                if seen[rphash] == nil
+                        seen[rphash]=1
+                        o1.puts(Fastq.tofastqstr(rp[0]))
+                        o2.puts(Fastq.tofastqstr(rp[1]))
+                end
+        end
+        mv(t.prerequisites[0]+"dedupe.tmp",t.prerequisites[0]+"dedupe")
+        mv(t.prerequisites[1]+"dedupe.tmp",t.prerequisites[1]+"dedupe")
+end
+
+
+
+rule '.fastqclip' => '.fastqde' do |t|
+ f = Fastq.new(t.prerequisites[0])
+ out = File.new(t.name + ".tmp","w")
+ if (t.name =~ /_1.fastq/)
+         #So, please trim all read 1s that have AGATCGGAAGAG - i.e. at the point
+         #that the sequence becomes this, remove all the bases that follow.
+         seq = /AGATCGGAAGAG.*/
+ else
+         #For these sequences, read 2 will need to be trimmed back too. This will
+         #start with mouse sequence, and will then run into the transposon
+         #sequence: TTAACCCTAGAAAG . . . .
+         seq = /TTAACCCTAGAAAG.*/
+
+ end
+         f.each{|r|
+                 if (r.seq =~ seq)
+                         clip = seq.match(r.seq).begin(0)
+                         if clip > 0
+                                 out.puts(r.name.chomp + "\n" + r.seq[0..clip] + "\n+\n" + r.qual[0..clip])   
+                         else
+                                 out.puts(r.name.chomp + "\n" + "NNNN" + "\n+\n" +  "!!!!")
+                         end
+                 else
+                         out.puts(r.name.chomp + "\n" + r.seq + "\n+\n" + r.qual) 
+                 end
+
+         }
+         mv(t.name+".tmp",t.name)
+end
+
+def fastqout(out,record)
+        out.puts(record.name.chomp + "\n" + record.seq + "\n+\n" + record.qual)
+end
+
+#Select the sequences that start with the tag
+rule(/_1.fastqsel$/ => [
+     proc {|task_name| task_name.sub(/.fastqsel$/,'.fastqclip') }
+     ]) do |t|
+             f = Fastq.new(t.prerequisites[0])
+             out = File.new(t.name + ".tmp","w")
+             f.each{|r|
+                     out.puts(r.name.chomp + "\n" + r.seq + "\n+\n" + r.qual) if (r.seq =~ tagregex ) if r.seq=~ tagregex
+             }
+             mv(t.name+".tmp",t.name)
+     end
+
+
+
+#remove sequences in _2 that aren't in _1
+rule(/_2.fastqsel$/ => [
+     proc {|task_name| task_name.sub(/.fastqsel$/,'.fastqclip') },
+     proc {|task_name| task_name.sub(/_2.fastqsel$/,'_1.fastqsel') }
+     ]) do |t|
+             f1 = Fastq.new(t.prerequisites[1])
+             f2 = Fastq.new(t.prerequisites[0])
+             out = File.new(t.name + ".tmp","w")
+             f1.each{|r1|
+               ok = false
+               while !ok
+                       r2 = f2.next
+                       if r1.name.sub(/\/1$/,"/2")==r2.name
+                               fastqout(out,r2)
+                               ok=true
+                       end
+               end
+             }
+             mv(t.name+".tmp",t.name)
+     end
+ 
+#produce the alignment
+rule(/.ssaha.*/ => [proc{|t| t.sub(/.ssaha/,'_1.fastqsel')},proc{|t| t.sub(/.ssaha/,'_2.fastqsel')}]) do |t|
+ puts t.name
+  command =  ssaha2 + ' -rtype solexa -score 20 -kmer 13 -skip 2 -output cigar -pair 2,500 -outfile ' + t.name+'.abnormal NCBI_M37.fa '  + t.prerequisites[0] + " " + t.prerequisites[0].gsub(/_1.fastq/,"_2.fastq") +" > " + t.name + ".tmp"
+  puts command
+  sh command
+  mv(t.name+".tmp",t.name)
+end
+
+
+class HashDir
+        def hashpath(file)
+                hashdir(file) + '/' + file
+        end
+        def hashdir(file)
+                hashtag = file.sub(/_[12]\./,".").sub(/\..*_/,"")
+                return MD5.new(hashtag).hexdigest[0..1] 
+        end
+end
+hasher = HashDir.new
+
+task :allssaha => Dir.glob("*_1.fastq").map{|n| n.sub(/._1.fastq$/,'.ssaha')}
+
+task :split => "split.stamp"
+file "split.stamp" do |t|
+        Dir.glob("*.fastqsel").each do |f|
+                puts "split -l 400000 " + f + " " + f +"_"
+        end
+        Dir.glob("*.fastqsel_[a-z][a-z]").each do |f|
+                hashdir = hasher.hashdir(f)
+                sh "mkdir -p #{hashdir}"
+                mv f, hashdir+"/"+f
+        end
+        sh "touch split.stamp"
+end
+
+
+
+task :merge => "merge.task"
+file "merge.task" do |t|
+        files = Dir.glob("*/*.ssaha_[a-z][a-z]").sort_by{|a| a.sub(/.*\//,"")}
+        files.map{|f| f.sub(/_[a-z][a-z]/,"").sub(/.*\//,"")}.uniq.each do |f|
+                sh "rm -f " + f
+        end
+        files.each do |f|
+                sh  "cat " + f + " >> " + f.sub(/_[a-z][a-z]/,"").sub(/.*\//,"")
+        end
+        sh "touch merge.task"
+end
+        
+require "tempfile"
+class File
+        def each(count)
+                while (!eof)
+                        c=count
+                        x=[]
+                        while(c>0 && !eof)
+                                x.push(readline)
+                                c-=1
+                        end
+                        yield x
+                end
+        end
+end
+class Rake::FileTask
+        def tmpname
+                name+".tmp"
+        end
+        def tmpout
+                File.new(tmpname,"w")
+        end
+        def fintmp
+                mv name+".tmp", name
+        end
+end
+
+rule ".cigar" => ".ssaha" do |t|
+        sh " grep \/1 #{t.prerequisites[0]} > #{t.name}"
+end
+
+rule ".pileup" => [proc {|n| n.sub(/.pileup/,"_1.fastqsel")},".cigar"] do |t|
+        #script = Tempfile.new("script")
+        #script.chmod(0700)
+        #script.puts("./ssaha_pileup -cons 1 -cover 0 #{t.prerequisites[1]} NCBI_M37.fa #{t.prerequisites[0]} > #{t.tmpname}")
+        #script.close
+        #sh "msub 60000 -o pileup.out.%J -q hugemem -K " + script.path
+        #script.delete
+        sh ssaha_pileup + " -cons 1 -cover 0 #{t.prerequisites[1]} NCBI_M37.fa #{t.prerequisites[0]} > #{t.tmpname}"
+        t.fintmp
+end
+
+task :allpileup=>allruns.map{|i| i+".pileup"}
+task :allfastq=>allruns.map{|i| i+".fastqgood"}
+task :allsum=>allruns.map{|i| i+".summary-ann"}
+class PileupSum
+        @chr
+        @pos
+        @startpos
+        @cov
+        @out 
+        @started
+        def set_out(output)
+                @out=output
+        end
+
+        def initialize
+                @chr=""
+                @pos=0
+                @startpos=0
+                @cov=[]
+                @started=false
+        end
+        def consume(line)
+                spl = line.split
+                newchr = spl[1]
+                newpos = spl[2].to_i
+                newcov = spl[3].to_i
+                if (newpos-@pos > 1 || @chr!=newchr)
+                        flush(newcov,newpos,newchr)
+                else
+                        @started=true
+                        @cov.push(newcov)
+                        @pos=newpos
+                        @chr=newchr
+                end
+        end
+        def flush(newcov,newpos,newchr)
+                if (@started)
+                        fin
+                end
+                @cov=[newcov]
+                @startpos=newpos
+                @pos=newpos
+                @chr=newchr
+        end
+        def fin
+                @out.puts @chr + " " + @startpos.to_s + " " + (@pos + 1 - @startpos).to_s + " " + mean(@cov).to_s
+        end
+
+        def mean(cov)
+                i=0.0
+                cov.each{|a| i+=a}
+                i/cov.length
+        end
+        
+end
+
+
+rule ".summary" => [".pileup"] do |t|
+        summ = PileupSum.new
+        summ.set_out(t.tmpout)
+        File.open(t.prerequisites[0]).each_line{|line|
+                next unless line[0..3]=="cons"
+                summ.consume(line)
+        }
+        summ.fin
+        t.fintmp
+end
+
+require 'ensembl'
+include Ensembl::Core
+class Annotate
+        def initialize
+                DBConnection.connect('mus_musculus',54)
+        end
+
+        def annotate(string)
+                #1 4199590 23 1.0
+                spl = string.split
+                buffer = 100000
+
+                out = ""
+
+                slice = Slice.fetch_by_region('chromosome',spl[0],spl[1].to_i - buffer ,spl[2].to_i + spl[1].to_i + buffer ,1)
+                nearslice = Slice.fetch_by_region('chromosome',spl[0],spl[1].to_i - 1000 ,spl[2].to_i + spl[1].to_i + 1000 ,1)
+                realslice = Slice.fetch_by_region('chromosome',spl[0],spl[1].to_i ,spl[2].to_i + spl[1].to_i,1)
+                slice.genes.find_all{|g| g.slice.overlaps?(realslice)}.each do |gene|
+                        out = out + "g:"+gene.stable_id+","
+                        gene.transcripts.find_all{|t| t.slice.overlaps?(realslice)}.each do |t|
+                                out=out+"t:"+t.stable_id+"_"+t.strand.to_s + ","
+                                t.exons.find_all{|e| e.slice.overlaps?(realslice)}.each do |e|
+                                        out = out + "e:"+e.stable_id+","
+                                end
+                                t.introns.find_all{|i| i.slice.overlaps?(realslice)}.each do |i|
+                                        out = out + "i_"
+
+                                        #if t.strand==1
+                                        #        out=out+i.previous_exon.end_phase.to_s
+                                        #else
+                                        #        out=out+i.previous_exon.end_phase.to_s
+                                        #end
+                                        #with my patches
+                                        out=out+i.previous_exon.end_phase.to_s
+                                        out = out +","
+                                end
+
+                        end
+                end
+                slice.genes.find_all{|g| (g.slice.overlaps?(nearslice) && !g.slice.overlaps?(realslice))}.each do |gene|
+                        out = out + "n:"+gene.stable_id+","
+                end
+                return out
+        end
+end
+
+
+rule ".summary-ann" => [".summary-ann-raw",".pileup_dir"] do |t|
+        output = t.tmpout
+        threshold = 5.0
+        dirF=Hash.new{|h,k| h[k]=Hash.new(0)}
+        dirR=Hash.new{|h,k| h[k]=Hash.new(0)}
+        File.open(t.prerequisites[1]).each_line{|l|
+                s = l.split
+                dirF[s[0]][s[1].to_i]=s[2].to_i
+                dirR[s[0]][s[1].to_i]=s[3].to_i
+        }
+        File.open(t.prerequisites[0]).each_line.find_all{|l| 
+                s = l.split
+                (s[2].to_i > 50 && s[3].to_f > threshold )
+        }.each{|line|
+                s = line.split
+                f = dirF[s[0]]
+                r = dirR[s[0]]
+                fTot = 0.0
+                rTot = 0.0
+                (s[1].to_i .. s[1].to_i + s[2].to_i).each do |i|
+                        fTot+=f[i]
+                        rTot+=r[i]
+                end
+                rTot/=s[2].to_f
+                fTot/=s[2].to_f
+                output.puts(line.chomp + " " + fTot.to_s + " " + rTot.to_s)
+        }
+        t.fintmp
+end
+
+ann = Annotate.new
+rule ".summary-ann-raw" => ".summary" do |t|
+        output = t.tmpout
+        File.open(t.prerequisites[0]).each_line{|line|
+                output.puts(line.chomp + " " + ann.annotate(line))
+        }
+        t.fintmp
+end
+
+rule ".summary-fin" => ".summary-ann" do |t|
+        #want seqs with correct strand
+        output = t.tmpout
+        File.open(t.prerequisites[0]).each_line.find_all{ |line|
+                s = line.split
+                if s.length > 6 && !(s[4]=~/t:/).nil? # then gene hit
+                        if s[5].to_f < 0.001 || s[6].to_f < 0.001
+                                if s[5].to_f > 0.001 #assume forward
+                                        if (s[4]=~/_1/).nil?
+                                                false
+                                        else
+                                                true
+                                        end
+                                else #negative
+                                        if (s[4]=~/_-1/).nil?
+                                                false
+                                        else
+                                                true
+                                        end
+
+                                end
+                        else
+                                false
+                        end
+                else
+                        true
+                end
+        }.each{|line|
+                output.puts(line)
+        }
+        t.fintmp
+end
+
+rule ".pileup_dir" => ".cigargood" do |t|
+        require 'ostruct'
+
+        #cigar::50 IL13_2618:1:1:6:1924/1 3 54 + 4 116467134 116467185 + 52 M 52
+        dir={}
+        dir["+"]=Hash.new{|h,k| h[k]=Hash.new(0)}
+        dir["-"]=Hash.new{|h,k| h[k]=Hash.new(0)}
+        vals=[]
+        File.open(t.prerequisites[0]).each_line do |l|
+                s = l.split
+                #ignores indels but should be okay
+                start = s[6].to_i
+                stop = s[7].to_i
+                chr = s[5]
+                d = dir[s[4]]
+                (start..stop).each{|i|
+                       d[chr][i]=d[chr][i]+1
+                }
+        end
+        out = t.tmpout
+        (dir["+"].keys + dir["-"].keys).sort.uniq.each do |chr|
+                (dir["+"][chr].keys + dir["-"][chr].keys).sort.uniq.each do |pos|
+                        out.puts chr + " " + pos.to_s + " " + dir["+"][chr][pos].to_s + " " + dir["-"][chr][pos].to_s + "\n"
+                end
+        end
+        t.fintmp
+end 
+
+rule ".hotspot-csv" => ".summary-fin" do |t|
+       # 1 15816457 53 35.3396226415094 g:ENSMUSG00000025925,t:ENSMUST00000093770_1,t:ENSMUST00000027057_1, 35.3396226415094 0.0
+        out = t.tmpout
+        genehash = Hash.new{|h,k| h[k]=[]}
+        File.open(t.prerequisites[0]).each_line.find_all{|l| l=~/g:/}.each do |l|
+                s = l.split
+                genes = s[4].split(",").find_all{|g| g[0..1]=="g:"}
+                genes.each{|g|
+                        genehash[g].push(s[0]+","+s[1]+","+s[2]+","+s[3])
+                }
+        end
+        genehash.each.sort_by{|k,v| v.length}.each{|k,v|
+                out.puts(v.length.to_s + "," + k + "," + v.join(","))
+        }
+        t.fintmp
+end
+task :allhotspot => allruns.map{|l| l+".hotspot-csv"}
+
+file "allhotspots.csv" => :allhotspot do |t|
+        out = t.tmpout
+        allruns.map{|l| l+".hotspot-csv"}.each{|file|
+                out.puts(file.gsub(".hotspot-csv",""))
+                File.open(file).each_line{|l| out.puts(l)}
+        }
+        t.fintmp
+end
+
+rule ".GGCTAA" => ".fastq" do |t|
+        if t.prerequisites[0]=~/_[0-9]_2.fastq/
+                leftfile= t.name.gsub(/_2\./,'.')
+                sh "rake " + leftfile
+                sh "fastqpair " + leftfile + " " +t.prerequisites[0] + " > " + t.tmpname
+                t.fintmp
+        else
+                sh "grep ^GGCTAG -A 2 -B 1 " + t.prerequisites[0] + " | grep -v -- ^--$  > " + t.tmpname
+                t.fintmp
+        end
+end
+       
+rule ".GGCTAA-out" => ".GGCTAA"  do |t|
+        pair = t.prerequisites[0].gsub(/\./,'_2.')
+        sh "rake " + pair
+        
+        sh "/nfs/team117/hp3/sw/arch/ia64-linux/bin/ssaha2-2.3.1 -rtype solexa -kmer 13 -skip 2 -score 20 -output cigar -outfile " + t.name + "abnormal -diff 0 -pair 2,500 NCBI_M37.fa " + t.prerequisites[0] + " " + pair + " > " + t.tmpname
+        t.fintmp
+
+end
+
+task :normalGGCTAA do |t|
+        allruns.each{|i|
+                mv i+".GGCTAA", i+".fastq" if File.exists?(i)
+        }
+        Dir.glob("*.GGCTAA-*").each{|i|
+                mv i, i.gsub("GGCTAA-","")
+        }
+        Dir.glob("*.GGCTAA").each{|i|
+                mv i, i.gsub("GGCTAA","fastq")
+        }
+end
+        
