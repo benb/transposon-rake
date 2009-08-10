@@ -50,8 +50,8 @@ rule(/_1.fastqde/ =>
                 rphash = rp[0].seq + "," + rp[1].seq
                 if seen[rphash] == nil
                         seen[rphash]=1
-                        o1.puts(Fastq.tofastqstr(rp[0]))
-                        o2.puts(Fastq.tofastqstr(rp[1]))
+                        o1.puts(rp[0].to_s)
+                        o2.puts(rp[1].to_s)
                 end
         end
         mv(t.prerequisites[0]+"dedupe.tmp",t.prerequisites[0]+"dedupe")
