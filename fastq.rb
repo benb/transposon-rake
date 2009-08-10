@@ -16,7 +16,7 @@ class Fastq
                 seq = @f.readline.chomp
                 @f.readline
                 qual=@f.readline.chomp
-                return OpenStruct.new(:name => name, :seq => seq, :qual => qual)
+                return FastqRecord.new(name,seq,qual)
         end
         def has_next?
                 return !@f.eof?
@@ -26,3 +26,16 @@ class Fastq
         end
 end
 
+class FastqRecord
+        attr_reader :name, :seq, :qual
+        def initialize(name,seq,qual)
+                @name=name
+                @seq=seq
+                @qual=qual
+        end
+        def to_s
+                @name + "\n" + @seq + "\n+\n" + @qual
+        end
+
+end
+        
