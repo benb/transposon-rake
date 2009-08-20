@@ -1,9 +1,7 @@
 require 'rubygems'
-require 'amatch'
 require 'ostruct'
 require 'fastq'
 require 'md5'
-include Amatch
 
 
 allruns = ["3293_2","3293_3","3293_5","3293_6"]
@@ -54,8 +52,8 @@ rule(/_1.fastqde/ =>
                         o2.puts(rp[1].to_s)
                 end
         end
-        mv(t.prerequisites[0]+"dedupe.tmp",t.prerequisites[0]+"dedupe")
-        mv(t.prerequisites[1]+"dedupe.tmp",t.prerequisites[1]+"dedupe")
+        mv(t.prerequisites[0]+"dedupe.tmp",t.prerequisites[0]+"de")
+        mv(t.prerequisites[1]+"dedupe.tmp",t.prerequisites[1]+"de")
 end
 
 
