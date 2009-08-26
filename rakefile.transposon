@@ -14,6 +14,8 @@ ssaha2='~hp3/sw/arch/x86_64-linux/bin/ssaha2-2.4'
 tagregex = /^[NG][GN][TN][TN][AN][AN]/
 
 task :process_fastq => allruns.map{|i| i+"_1.fastqsel"} + allruns.map{|i| i + "_2.fastqsel"}
+min_mapped_length = 50
+min_mapped_depth = 5.0
 
 class PairFastq
         def initialize(r1,r2)
@@ -335,7 +337,6 @@ end
 
 rule ".summary-ann" => [".summary-ann-raw",".pileup_dir"] do |t|
         output = t.tmpout
-        threshold = 5.0
         dirF=Hash.new{|h,k| h[k]=Hash.new(0)}
         dirR=Hash.new{|h,k| h[k]=Hash.new(0)}
         File.open(t.prerequisites[1]).each_line{|l|
@@ -345,7 +346,7 @@ rule ".summary-ann" => [".summary-ann-raw",".pileup_dir"] do |t|
         }
         File.open(t.prerequisites[0]).each_line.find_all{|l| 
                 s = l.split
-                (s[2].to_i > 50 && s[3].to_f > threshold )
+                (s[2].to_i > min_mapped_length && s[3].to_f > min_mapped_depth )
         }.each{|line|
                 s = line.split
                 f = dirF[s[0]]
